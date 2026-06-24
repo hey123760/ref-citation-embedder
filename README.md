@@ -76,4 +76,4 @@ python scripts/refcite.py 论文.docx --auto --verify
 ## 许可证
 
 MIT
-readme你可以帮我改一下吗，重点突出一下双轨模式，也就是zotero用户需要自己引用的问题，而我们的脚本可以和AI结合自行跑完引用
+
