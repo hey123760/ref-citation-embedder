@@ -100,11 +100,12 @@ def split_at_punct(run_elem, target_chars='，。'):
     nr.append(nt); run_elem.addnext(nr)
     return nr, 'before'
 
-def find_target(para_elem, search_from=0, max_dist=30, target_chars='，。'):
+def find_target(para_elem, search_from=0, max_dist=200, target_chars='，。', occurrence=1):
     """
-    从 search_from 开始找首个含 target_chars 中任一字符的 run。
+    从 search_from 开始找第 occurrence 个含 target_chars 中任一字符的 run。
     max_dist: 最大搜索距离（字符数），超出则返回 None 回落段末
     target_chars: 要搜索的标点字符集，默认 '，。'
+    occurrence: 第几次出现（1-based），默认1
     """
     runs = list(para_elem.findall(f'{{{NS}}}r'))
     acc = 0; si = 0; text_pos = 0
@@ -113,6 +114,7 @@ def find_target(para_elem, search_from=0, max_dist=30, target_chars='，。'):
         if acc + rl >= search_from: si = i; break
         acc += rl
         text_pos += rl
+    seen = 0
     for i in range(si, len(runs)):
         if i == 0: continue
         full = ''.join(t.text or '' for t in runs[i].findall(f'{{{NS}}}t'))
@@ -121,8 +123,11 @@ def find_target(para_elem, search_from=0, max_dist=30, target_chars='，。'):
         text_pos += len(full)
         for ch in target_chars:
             if ch in full:
-                tr, mode = split_at_punct(runs[i], target_chars)
-                if tr is not None: return tr, mode
+                seen += 1
+                if seen == occurrence:
+                    tr, mode = split_at_punct(runs[i], target_chars)
+                    if tr is not None: return tr, mode
+                break
                 break  # 跳出内层循环，外层继续找下一个 run
     return None, None
 
@@ -351,7 +356,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='refcite — 参考文献自动引用嵌入工具')
     parser.add_argument('input', help='输入 DOCX 文件路径')
-    parser.add_argument('--smap', help='句级映射: "19:1:。,24:2:；,27:3:。"（外部 AI 指定精确位置，脚本直接执行）')
+    parser.add_argument('--smap', help='句级映射: "19:1:。,24:2:。2,27:3:。"（段落:文献:标点[出现次数]，不传次数默认第1次）')
     parser.add_argument('--auto', action='store_true', help='自动关键词匹配（模式③，唯一使用启发式的地方）')
     parser.add_argument('--replace', action='store_true', help='模式D：正文已有 [N] 手打标记，原位替换为 REF 域（不做启发式匹配）')
     parser.add_argument('--keep-numbers', action='store_true', help='与 --replace 搭配使用：保持原文献编号，不按首次出现顺序重排')
@@ -530,9 +535,13 @@ def main():
                 parts = item.strip().split(':')
                 pidx = int(parts[0])
                 ref_id = int(parts[1]) - 1
-                marker = parts[2] if len(parts) > 2 else '。'
+                marker_field = parts[2] if len(parts) > 2 else '。'
+                # 提取标点字符和出现次数（如 '。3' → marker='。', occ=3）
+                mm = re.match(r'^([。！？；，])(\d*)$', marker_field)
+                marker = mm.group(1) if mm else '。'
+                occurrence = int(mm.group(2)) if mm and mm.group(2) else 1
                 if pidx not in smap: smap[pidx] = []
-                smap[pidx].append((ref_id, marker))
+                smap[pidx].append((ref_id, marker, occurrence))
                 all_refs_ordered.append((pidx, ref_id))
             # 过滤被跳过的段落
             valid_set = {pidx for pidx in range(ref_start)
@@ -575,7 +584,7 @@ def main():
                 pe = doc.paragraphs[pidx]._element
                 text = doc.paragraphs[pidx].text
                 search_start = 0
-                for ri, marker in items:
+                for ri, marker, occurrence in items:
                     pn = proj[ri]; bmn = f'_Ref{5000+pn}'
                     rr = make_ref_runs(bmn, pn)
                     ref_done.add(ri)
@@ -584,17 +593,23 @@ def main():
                         print(f'  P{pidx} → [{pn}] 跳过（含脚注）')
                         continue
                     
-                    mpos = text.find(marker, search_start)
+                    # 找第 occurrence 个 marker
+                    mpos = -1
+                    for o in range(occurrence):
+                        mpos = text.find(marker, mpos + 1 if mpos >= 0 else search_start)
+                        if mpos < 0: break
+                    
                     if mpos >= 0:
-                        # 以映射传入的 marker 为拆分依据，不固定搜索 ，。
-                        tr, mode = find_target(pe, max(0, mpos - 2), target_chars=marker)
+                        # 位置已算出，find_target 从该位置找第一个 marker 即可
+                        tr, mode = find_target(pe, max(0, mpos - 2), target_chars=marker, occurrence=1)
                     else:
                         tr, mode = None, None
                     
                     if tr is not None:
                         if mode == 'before': insert_before(tr, rr)
                         else: insert_after(tr, rr)
-                        print(f'  P{pidx} → [{pn}] 在「{marker}」前 ✅')
+                        occ_str = f'第{occurrence}个' if occurrence > 1 else ''
+                        print(f'  P{pidx} → [{pn}] 在{occ_str}「{marker}」前 ✅')
                         if mpos >= 0: search_start = mpos + 1
                     else:
                         runs = list(pe.findall(f'{{{NS}}}r'))
